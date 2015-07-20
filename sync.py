@@ -1,0 +1,30 @@
+#!/usr/bin/env python2
+import hashlib
+
+class Files(object):
+	hash_block_size = 4048 
+	def watch(self, path):
+		print "test"
+
+	def hash(self, filename):
+		hasher = hashlib.md5()
+		with open(filename, 'rb') as f:
+			buf = f.read(self.hash_block_size)
+    		while len(buf) > 0:
+        		hasher.update(buf)
+        		if len(buf) == self.hash_block_size:
+        			buf = f.read(self.hash_block_size)
+        		else:
+        			break
+		print hasher.hexdigest()
+
+
+if __name__ == "__main__":
+	fm = Files()
+	for i in range(1000):
+		fm.hash("sync.py")
+
+
+
+
+
