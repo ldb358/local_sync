@@ -1,4 +1,4 @@
-My proposed project is a server-client file syncing application. Clients would provide an IP port a group name and a password.  The server would then keep the files synced between all clients and the server. 
+My proposed project is a server-client file syncing application. Clients would provide an IP port a group name and a password.  The server would then keep the files synced between all clients and the server.
 
 The server:
 creates a hash for every file in the directory and then waits for clients and changes to files in the directory. This would probably be done with one thread waiting for new changes to files and one thread waiting for clients.
@@ -8,11 +8,25 @@ When a client connects they would authenticate by sending:
 {
     “type”: “auth”,
     “group”: group_name
-    “hash”:sha1(group_name+password)
+    “token”:sha1(group_name+password)
 }
+Server response:
+{
+    “type”: “error”,
+    "error": "error message"
+}
+or
+{
+    “type”: “accept”,
+    "files": [
+      {"file_name": "file hash"}
+    ]
+}
+
 ```
 if the password is correct they will be added to a client list. otherwise the connection will be closed
 All files on new connected clients are to be considered older than the current server version.
+
 When a file in the directory is changed a new hash is created and request attempted to be sent to all clients of the format:
 ```
 {
@@ -34,7 +48,10 @@ Server can respond to requests for the file by sending:
 }
 ```
 
-followed by 1000 byte packets containing the file
+The client will respond with an r bit and then the server will start the download
+by sending the file in 1024 byte packets containing the file
+
+
 The server can receive packets of the form:
 
 ```
@@ -51,7 +68,7 @@ if the hash matches the server version for that file the server will respond wit
 
 ```
 {
-    “type”:”accept”
+    “type”:”send”
 }
 ```
 
@@ -63,7 +80,7 @@ Clients can make a request for any file using its filename and hash of the forma
 ```
 {
     “type”: “request”
-    “hash”: [hash]
+    “name”: "filename"
 }
 ```
 

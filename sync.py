@@ -1,9 +1,7 @@
 #!/usr/bin/env python2
 # TODO:
-# Get directory watching working
-#	on init create a HashStore()
-#	walk the directory and create a hash for every file in order
-# 	start watching the directoy
+# Implement getops
+# add network protocol
 
 
 import hashlib
@@ -11,11 +9,14 @@ import os
 from watchdog.observers import Observer
 from watchdog.events import PatternMatchingEventHandler
 import time
+import getopt
+import sys
+import network
 
 def hash_file(filename, block_size=4048):
 	hasher = hashlib.sha256()
 	while not os.path.exists(filename):
-		pass 
+		pass
 	with open(str(filename), 'rb') as f:
 		buf = f.read(block_size)
 		while len(buf) > 0:
@@ -74,15 +75,29 @@ class HashStore(object):
 		self.cache = DictQueue()
 		if not os.path.exists(os.path.join(".", ".sync")):
 			os.mkdir(".sync")
-
+		for root, dirs, files in os.walk('.sync'):
+			for name in files:
+				path = os.path.join(root, name)
+				os.unlink(path)
 		for root, dirs, files in os.walk('.'):
 			for name in files:
 				path = os.path.join(root, name)
 				self.add(path)
 
+	def get_all_hashes(self):
+		hashes = {}
+		for root, dirs, files in os.walk(os.path.join(".", ".sync")):
+			for name in files:
+				path = os.path.join(root, name)
+				with open(path, "r") as f:
+					file_hash = f.read()
+				name = os.path.basename(path)
+				hashes[name] = file_hash
+		return hashes
+
 	def get(self, path):
 		file_hash = hash_file(path)
-		path_hash = hash_string(path)
+		path_hash = path.replace(os.sep, "%sep%")
 		cached = self.cache.get(file_hash)
 		#any value is okay expect expliclity False
 		if not cached == False:
@@ -102,7 +117,7 @@ class HashStore(object):
 		if os.path.join('.', '.') in path:
 			return
 		file_hash = hash_file(path)
-		path_hash = hash_string(path)
+		path_hash = path.replace(os.sep, "%sep%")
 		with open(os.path.join(".sync", path_hash), "w+b") as f:
 			f.write(file_hash)
 		self.cache.push(path_hash, file_hash)
@@ -110,15 +125,18 @@ class HashStore(object):
 
 
 class FileChangeHandler(PatternMatchingEventHandler):
-	def __init__(self, fm):
+	def __init__(self, fm, store):
 		super(FileChangeHandler, self).__init__()
-		self.store = HashStore()
+		self.store = store
+		self.ignore = [os.path.join('.', 'sync.py'),
+						os.path.join('.', 'network.py')]
 
 	def process(self, event):
 		if os.path.join(".", ".") in event.src_path:
 			return
 		store = self.store.get(event.src_path)
-		if store:
+		print event.src_path
+		if store and not event.src_path in self.ignore:
 			print hash_file(event.src_path)
 
 	def on_modified(self, event):
@@ -131,19 +149,81 @@ class FileChangeHandler(PatternMatchingEventHandler):
 class FileOps(object):
 	Observer = None
 	def watch(self, path):
+		self.store = HashStore()
 		self.observer = Observer()
-		self.observer.schedule(FileChangeHandler(self), path, recursive=True)
+		self.observer.schedule(FileChangeHandler(self, self.store),
+													path, recursive=True)
 		self.observer.start()
 
 	def stop_watch(self):
 		self.observer.stop()
 
+	def get_files(self):
+		return self.store.get_all_hashes()
+
+	def set_net_callback(self, callback):
+		self.net = callback
+
+	def file_current(self, filename, filehash):
+		filename = filename.replace("%sep%", os.sep)
+		if(os.path.isfile(filename)):
+			return self.store.get(filename) == filehash
+		return False
+
+	def open_file(self, filename, mode):
+		head,tail = os.path.split(filename)
+		if not os.path.isfile(filename):
+			os.mkdirs(head)
+		f = open(filename, mode)
+		return f
+
+
 
 if __name__ == "__main__":
 	fm = FileOps()
 	fm.watch(".")
+	# Use get opt to get all of out command line arguments
+	optlist, args = getopt.getopt(sys.argv[1:], 'sc:p:g:k:')
+	if(len(optlist) < 4):
+		print "you must have the following arguments:"
+		print "-s : launch as a server or you can have -c"
+		print "-c [ip] : the ip address of the server for the client to connect to"
+		print "-p [portno] : the port number to connect to or create the server on"
+		print "-g [group name] : the group name to connect to"
+		print "-k [passkey] : the pass key yo use for login"
+		sys.exit()
+	port = -1
+	server = ''
+	is_server = False
+	group = 'default'
+	passkey = 'default'
+	for arg in optlist:
+		if arg[0] == '-s':
+			is_server = True
+		elif arg[0] == '-c':
+			server = arg[1]
+		elif arg[0] == '-p':
+			port = int(arg[1])
+		elif arg[0] == '-g':
+			group = arg[1]
+		elif arg[0] == '-k':
+			passkey = arg[1]
+		else:
+			print "Invalid argument:", arg
+	# depending on whether we are a server or client we need a different handler
+	# class
+	if is_server:
+		net_conn = network.ServerNetworkInterface('', port, group, passkey)
+	else:
+		net_conn = network.ClientNetworkInterface(server, port, group, passkey)
+	#set the callbacks
+	net_conn.set_file_manager(fm)
+	fm.set_net_callback(net_conn.update)
 	try:
-		while True:
+		#loop while waiting for files
+		while not net_conn.stop:
 			time.sleep(1)
 	except KeyboardInterrupt:
 		fm.stop_watch()
+		net_conn.stop_net()
+		print "Exiting, please wait while everything is cleaned up"
