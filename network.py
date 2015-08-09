@@ -5,6 +5,7 @@ import json
 import hashlib
 import time
 import sys
+import os
 
 class SyncNetworkInterface(object):
     def __init__(self, ip, port, group='default', pkey='default'):
@@ -84,10 +85,37 @@ class ServerNetworkInterface(SyncNetworkInterface):
                 self.auth(conn, message)
             elif message["type"] == "request":
                 self.request(conn, message["name"])
+            elif message["type"] == "push":
+                self.push(conn, message["name"], int(message["size"]), message["hash"])
             elif message["type"] == "error":
                 print message["error"]
         except KeyError:
             conn.sendall(self.create_error_message("Missing Field in Request"))
+
+    def push(self, conn, filename, filesize, old_hash):
+        if self.fm.file_current(filename, old_hash):
+            #let the client know to send the file
+            ready = {
+                "type": "send"
+            }
+            conn.sendall(json.dumps(ready))
+            data = ''
+            downloaded = 0
+            #open the local file
+            f = self.fm.open_file(filename, "wb")
+            print "Downloading:", filename.replace("%sep%", os.sep)
+            #while there is more file
+            while downloaded < filesize:
+                # get the next chunk
+                data = conn.recv(1024)
+                # keep track of how much we have
+                downloaded += len(data)
+                #write it to the file
+                f.write(data)
+                progress = int(float(downloaded)/filesize*100)
+                print progress,
+                sys.stdout.flush()
+            print
 
     def auth(self, client, message):
         if message["group"] == self.group and message["token"] == self.get_auth():
@@ -103,13 +131,14 @@ class ServerNetworkInterface(SyncNetworkInterface):
             client.close()
 
     def request(self, client, filename):
-        if not os.path.isfile(filename):
+        fn = filename.replace("%sep%", os.sep)
+        if not os.path.isfile(fn):
             client.sendall(self.create_error_message("File Does Not Exist"))
             client.close()
             return
         response = {
             "type": "download",
-            "size": os.path.getsize(filename.replace("%sep%", os.sep)),
+            "size": os.path.getsize(fn),
             "name": filename
         }
         client.sendall(json.dumps(response))
@@ -120,9 +149,21 @@ class ServerNetworkInterface(SyncNetworkInterface):
                 data = f.read(1024)
                 if not data: break
                 client.sendall(data)
-            f.close()
+            self.fm.close_file(filename, f)
         self.current_clients.append(client)
 
+    def update(self, filename, oldhash, filehash):
+        packet = {
+            "type": "update",
+            "name": filename,
+            "old": oldhash,
+            "new": filehash
+        }
+        print "Change to", filename
+        strpacket = json.dumps(packet)
+        readable, writable, errored = select.select([], self.current_clients[1:], [], 1)
+        for conn in writable:
+            conn.sendall(strpacket)
 
 class ClientNetworkInterface(SyncNetworkInterface):
     def init_connection(self):
@@ -154,7 +195,9 @@ class ClientNetworkInterface(SyncNetworkInterface):
                     continue
                 message = json.loads(all_data)
                 if message["type"] == "accept":
-                    self.setup_files(message["files"])
+                    self.setup_files(conn, message["files"])
+                elif message["type"] == "update":
+                    self.update_file(message["name"], message["new"])
                 elif message["type"] == "error":
                     print "Error:", message["error"]
                     #stop this thread
@@ -169,10 +212,6 @@ class ClientNetworkInterface(SyncNetworkInterface):
     # version is up to date, if its not we download it
     #
     def setup_files(self, conn, files):
-        base_req = {
-            "type": "request",
-            "name": ""
-        }
         #
         # for every file we need to see if we have a version that matches the
         # server if not we need to downloaded it
@@ -180,36 +219,81 @@ class ClientNetworkInterface(SyncNetworkInterface):
         for key in files:
             #check if out version is current
             if(not self.fm.file_current(key, files[key])):
-                #if not we need to download it, so prepare the request
-                base_req["name"] = key
-                #send the request
-                self.client_s.sendall(json.dumps(base_req))
-                #get the response
+                self.get_file(key)
+
+    #
+    # handles an update type request by seeing if our file matchs the new file
+    # if not it downloads it
+    #
+    def update_file(self, filename, new_hash):
+        if(not self.fm.file_current(filename, new_hash)):
+            self.get_file(filename)
+
+    #
+    # This is called when a client has a file changed
+    #
+    def update(self, filename, oldhash, filehash):
+        fn = filename.replace("%sep%", os.sep)
+        #create a push packet
+        packet = {
+            "type": "push",
+            "name": filename,
+            "size": os.path.getsize(fn),
+            "hash": oldhash
+        }
+        self.client_s.sendall(json.dumps(packet))
+        response = json.loads(self.client_s.recv(1024))
+        #make sure that the server wants the packet, our old hash must match
+        #the servers hash for the server to accept our file
+        if response["type"] == "send":
+            #open the file read send it 1024 bytes at a time
+            f = self.fm.open_file(filename, "rb")
+            while 1:
+                data = f.read(1024)
+                if not data: break
+                self.client_s.sendall(data)
+            self.fm.close_file(filename, f)
+        else:
+            print response["error"]
+
+
+    def get_file(self, filename):
+        base_req = {
+            "type": "request",
+            "name": ""
+        }
+        #if not we need to download it, so prepare the request
+        base_req["name"] = filename
+        #send the request
+        self.client_s.sendall(json.dumps(base_req))
+        #get the response
+        data = self.client_s.recv(1024)
+        message = json.loads(data)
+        #if we get to download the file
+        if message["type"] == "download":
+            #get the expected size
+            size = int(message["size"])
+            data = ''
+            downloaded = 0
+            #open the local file
+            f = self.fm.open_file(filename, "wb")
+            print "Downloading:", filename.replace("%sep%", os.sep)
+            #let the server know we are ready
+            self.client_s.sendall('r')
+            #while there is more file
+            while downloaded < size:
+                # get the next chunk
                 data = self.client_s.recv(1024)
-                message = json.loads(data)
-                #if we get to download the file
-                if message["type"] == "download":
-                    #get the expected size
-                    size = int(message["size"])
-                    data = ''
-                    downloaded = 0
-                    #open the local file
-                    f = self.fm.open_file(filename, "wb")
-                    #let the server know we are ready
-                    self.client_s.sendall('r')
-                    #while there is more file
-                    while downloaded < size:
-                        # get the next chunk
-                        data = self.client_s.recv(1024)
-                        # keep track of how much we have
-                        downloaded += len(data)
-                        #write it to the file
-                        f.write(data)
-                        progress = int(float(downloaded)/size*100)
-                        print progress,
-                        sys.stdout.flush()
-                    print
-                    #we are done so close the file
-                    close(f)
-                else:
-                    print message["error"]
+                # keep track of how much we have
+                downloaded += len(data)
+                #write it to the file
+                f.write(data)
+                progress = int(float(downloaded)/size*100)
+                print progress,
+                sys.stdout.flush()
+            print
+            #we are done so close the file
+            #self.fm.update_hash(filename)
+            self.fm.close_file(filename, f)
+        else:
+            print message["error"]

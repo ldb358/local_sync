@@ -131,28 +131,41 @@ class FileChangeHandler(PatternMatchingEventHandler):
 		self.ignore = [os.path.join('.', 'sync.py'),
 						os.path.join('.', 'network.py')]
 
-	def process(self, event):
+	def process(self, event, nw=False):
 		if os.path.join(".", ".") in event.src_path:
 			return
 		store = self.store.get(event.src_path)
-		print event.src_path
-		if store and not event.src_path in self.ignore:
-			print hash_file(event.src_path)
+		if (not event.src_path in self.ignore):
+			print "File Changed",event.src_path, "With Hash", hash_file(event.src_path)
+			fn = event.src_path.replace(os.sep, "%sep%")
+			hs = hash_file(event.src_path)
+			if nw:
+				self.file_updated(event.src_path, '', hs)
+			else:
+				self.file_updated(event.src_path, store, hs)
 
 	def on_modified(self, event):
-		self.process(event)
+		self.process(event, nw=False)
 
 	def on_created(self, event):
-		self.process(event)
+		self.process(event, nw=True)
 
+	def add_ignore(self, fn):
+		self.ignore.append(fn)
+
+	def remove_ingore(self, fn):
+		self.ignore.remove(fn)
+
+	def set_file_update_callback(self, callback):
+		self.file_updated = callback
 
 class FileOps(object):
 	Observer = None
 	def watch(self, path):
 		self.store = HashStore()
 		self.observer = Observer()
-		self.observer.schedule(FileChangeHandler(self, self.store),
-													path, recursive=True)
+		self.file_change = FileChangeHandler(self, self.store)
+		self.observer.schedule(self.file_change, path, recursive=True)
 		self.observer.start()
 
 	def stop_watch(self):
@@ -163,6 +176,7 @@ class FileOps(object):
 
 	def set_net_callback(self, callback):
 		self.net = callback
+		self.file_change.set_file_update_callback(callback)
 
 	def file_current(self, filename, filehash):
 		filename = filename.replace("%sep%", os.sep)
@@ -171,11 +185,22 @@ class FileOps(object):
 		return False
 
 	def open_file(self, filename, mode):
+		filename = self.net_path_to_local(filename)
 		head,tail = os.path.split(filename)
 		if not os.path.isfile(filename):
-			os.mkdirs(head)
+			if not os.path.isdir(head):
+				os.makedirs(head)
+		self.file_change.add_ignore(filename)
 		f = open(filename, mode)
 		return f
+
+	def close_file(self, filename, f):
+		filename = self.net_path_to_local(filename)
+		f.close()
+		self.file_change.remove_ingore(filename)
+
+	def net_path_to_local(self, filename):
+		return filename.replace("%sep%", os.sep)
 
 
 
