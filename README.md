@@ -22,7 +22,6 @@ or
       {"file_name": "file hash"}
     ]
 }
-
 ```
 if the password is correct they will be added to a client list. otherwise the connection will be closed
 All files on new connected clients are to be considered older than the current server version.
@@ -35,6 +34,7 @@ When a file in the directory is changed a new hash is created and request attemp
     “old”: [old hash of file],
     “new”: [new hash of file]
 }
+
 ```
 
 if the packet could not be sent the client is removed from the list
